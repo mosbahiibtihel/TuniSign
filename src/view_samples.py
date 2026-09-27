@@ -12,6 +12,36 @@ DATASET_PATH = Path("data/raw/Dataset/Data")
 
 
 # ==============================
+# Which classes to inspect, and how many images per class.
+# Grouped so related classes sit next to each other in the grid -
+# makes it easy to eyeball "do these actually look different?"
+# ==============================
+
+TARGET_CLASSES = [
+    # the se7a/car mix-up isn't a semantic minimal pair - check for
+    # a labeling or extraction mistake
+    "se7a",
+    "car",
+
+    # scattered ("magnet") confusions - check if samples within the
+    # class itself look consistent, or if some are noisy/bad detections
+    "radio",
+    "siye7a",
+
+    # genuine minimal pairs - check if these are actually
+    # distinguishable by hand shape alone, or only by hand position
+    "o5t",
+    "5ou",
+    "jad",
+    "jadda",
+    "bent",
+    "eben",
+]
+
+SAMPLES_PER_CLASS = 4
+
+
+# ==============================
 # Check dataset path
 # ==============================
 if not DATASET_PATH.exists():
@@ -21,9 +51,9 @@ if not DATASET_PATH.exists():
 
 
 # ==============================
-# Find all class folders
+# Find all class folders, keyed by class name
 # ==============================
-class_dirs = []
+class_dirs_by_name = {}
 
 for category in DATASET_PATH.iterdir():
 
@@ -32,29 +62,26 @@ for category in DATASET_PATH.iterdir():
         for sign_class in category.iterdir():
 
             if sign_class.is_dir():
-                class_dirs.append(sign_class)
+                class_dirs_by_name[sign_class.name] = sign_class
 
 
-print("===== TuniSign Sample Viewer =====")
-print("Number of classes found:", len(class_dirs))
+print("===== TuniSign Targeted Sample Viewer =====")
+print("Number of classes found in dataset:", len(class_dirs_by_name))
 print()
 
 
 # ==============================
-# Choose random classes
-# ==============================
-sample_size = min(12, len(class_dirs))
-
-selected_classes = random.sample(class_dirs, sample_size)
-
-
-# ==============================
-# Choose one random image
-# from each selected class
+# Collect samples for each requested class
 # ==============================
 samples = []
 
-for class_dir in selected_classes:
+for class_name in TARGET_CLASSES:
+
+    class_dir = class_dirs_by_name.get(class_name)
+
+    if class_dir is None:
+        print(f"WARNING: class '{class_name}' not found in dataset, skipping.")
+        continue
 
     image_files = [
         file
@@ -63,42 +90,55 @@ for class_dir in selected_classes:
         and file.suffix.lower() in [".jpg", ".jpeg", ".png"]
     ]
 
-    if image_files:
+    if not image_files:
+        print(f"WARNING: class '{class_name}' has no images, skipping.")
+        continue
 
-        selected_image = random.choice(image_files)
+    n_to_take = min(SAMPLES_PER_CLASS, len(image_files))
+    chosen = random.sample(image_files, n_to_take)
 
-        samples.append(selected_image)
+    for image_path in chosen:
+        samples.append((class_name, image_path))
 
 
 # ==============================
 # Display images
 # ==============================
-fig, axes = plt.subplots(3, 4, figsize=(12, 9))
+n_rows = len(TARGET_CLASSES)
+n_cols = SAMPLES_PER_CLASS
 
-axes = axes.flatten()
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3, n_rows * 3))
 
-
-for ax, image_path in zip(axes, samples):
-
-    image = Image.open(image_path)
-
-    ax.imshow(image)
-
-    category_name = image_path.parent.parent.name
-    class_name = image_path.parent.name
-
-    ax.set_title(
-        f"{category_name} / {class_name}",
-        fontsize=10
-    )
-
-    ax.axis("off")
+# Make axes always indexable as [row][col], even if n_rows == 1
+if n_rows == 1:
+    axes = [axes]
 
 
-# Hide unused plots
-for ax in axes[len(samples):]:
+# Group the collected samples back by class, in the requested order
+samples_by_class = {name: [] for name in TARGET_CLASSES}
 
-    ax.axis("off")
+for class_name, image_path in samples:
+    samples_by_class[class_name].append(image_path)
+
+
+for row, class_name in enumerate(TARGET_CLASSES):
+
+    row_images = samples_by_class.get(class_name, [])
+
+    for col in range(n_cols):
+
+        ax = axes[row][col]
+
+        if col < len(row_images):
+
+            image = Image.open(row_images[col])
+            ax.imshow(image)
+
+        if col == 0:
+            ax.set_ylabel(class_name, fontsize=12, rotation=0, labelpad=40)
+
+        ax.set_xticks([])
+        ax.set_yticks([])
 
 
 plt.tight_layout()

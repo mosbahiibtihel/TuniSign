@@ -1,0 +1,5 @@
+5-fold stratified cross-validation
+Samples: 3971
+Classes: 56
+Features: 63
+Overall accuracy: 0.8406

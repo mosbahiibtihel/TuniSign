@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>TuniSign - Live Demo</title>
+
+<!--
+  ================================================================
+  STEP 1: Load the libraries we need, straight from a CDN.
+  No npm install needed for this simple version - just <script> tags.
+
+  - tfjs            : runs your trained Keras model in the browser
+  - mediapipe/hands  : detects the 21 hand landmarks from webcam video
+  - camera_utils     : small helper to pipe webcam frames into MediaPipe
+  ================================================================
+-->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+
+<style>
+  body { font-family: sans-serif; text-align: center; background: #111; color: #eee; }
+  #container { position: relative; width: 640px; margin: 20px auto; }
+  video, canvas { position: absolute; top: 0; left: 0; width: 640px; height: 480px; }
+  #prediction {
+    font-size: 32px;
+    margin-top: 500px;
+    padding: 10px;
+  }
+  #confidence { font-size: 16px; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>TuniSign Live Demo</h1>
+
+<!--
+  We need TWO overlapping elements here:
+  - <video>  shows the raw webcam feed
+  - <canvas> draws the detected hand skeleton on top of it
+  They're the same size and stacked with CSS "position: absolute".
+-->
+<div id="container">
+  <video id="webcam" autoplay playsinline></video>
+  <canvas id="overlay" width="640" height="480"></canvas>
+</div>
+
+<div id="prediction">Loading model...</div>
+<div id="confidence"></div>
+
+<script>
+
+// ================================================================
+// STEP 2: Global variables we'll fill in once things are loaded.
+// ================================================================
+
+let model = null;        // will hold the loaded TF.js model
+let classNames = [];      // will hold ["3aslema", "3ayla", ...] in the
+                           // SAME order the model was trained on
+
+const videoElement = document.getElementById("webcam");
+const canvasElement = document.getElementById("overlay");
+const canvasCtx = canvasElement.getContext("2d");
+const predictionDiv = document.getElementById("prediction");
+const confidenceDiv = document.getElementById("confidence");
+
+
+// ================================================================
+// STEP 3: Load the TF.js model and the class name list.
+//
+// Expects this folder layout next to this index.html file:
+//   model/model.json          <- from tensorflowjs_converter
+//   model/group1-shard1of1.bin (etc, the weight files)
+//   model/class_names.json    <- copy of models/class_names.json
+//                                 from your training script
+// ================================================================
+
+async function loadEverything() {
+
+  predictionDiv.textContent = "Loading model...";
+
+  // Your export produced a "Graph model" (format: "graph-model" in
+  // model.json), not a "Layers model" - so we use loadGraphModel here,
+  // not loadLayersModel. Everything else about the model (structure,
+  // normalization) is unchanged, only the loading API differs.
+  model = await tf.loadGraphModel("model/model.json");
+
+  // fetch() just downloads the JSON file as text, then we parse it.
+  const response = await fetch("model/class_names.json");
+  classNames = await response.json();
+
+  predictionDiv.textContent = "Model loaded. Starting camera...";
+
+  startCamera();
+}
+
+
+// ================================================================
+// STEP 4: Set up the webcam and hand tracking.
+//
+// MediaPipe's "Hands" object does all the hard computer-vision work:
+// give it a video frame, it gives you back 21 (x, y, z) points per
+// detected hand. We just have to feed it frames and read the result.
+// ================================================================
+
+function startCamera() {
+
+  const hands = new Hands({
+    // Must match the exact version pinned in the <script> tag above -
+    // mismatched versions between hands.js and its WASM files is what
+    // caused the "native code called abort()" crash.
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,              // we only care about one hand at a time
+    minDetectionConfidence: 0.3,  // matches the value you found worked
+                                   // best during your dataset extraction
+    minTrackingConfidence: 0.5
+  });
+
+  // This function runs automatically every time MediaPipe finishes
+  // processing a video frame. "results" contains the landmarks.
+  hands.onResults(onHandResults);
+
+  // Camera is a helper class that repeatedly grabs frames from the
+  // webcam and sends each one into hands.send({image: ...}).
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await hands.send({ image: videoElement });
+    },
+    width: 640,
+    height: 480
+  });
+
+  camera.start();
+
+  predictionDiv.textContent = "Show a sign...";
+}
+
+
+// ================================================================
+// STEP 5: This runs every frame. Draw the hand skeleton, then
+// run our own model on the landmarks to get a prediction.
+// ================================================================
+
+function onHandResults(results) {
+
+  // Clear the previous frame's drawing before drawing the new one.
+  canvasCtx.save();
+  canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    predictionDiv.textContent = "No hand detected";
+    confidenceDiv.textContent = "";
+    canvasCtx.restore();
+    return;
+  }
+
+  // We asked for maxNumHands: 1, so there's only ever one entry here.
+  const landmarks = results.multiHandLandmarks[0];
+
+  // Draw simple dots for each of the 21 points, just so you can see
+  // that tracking is working.
+  canvasCtx.fillStyle = "#00FF00";
+  for (const point of landmarks) {
+    canvasCtx.beginPath();
+    canvasCtx.arc(
+      point.x * canvasElement.width,
+      point.y * canvasElement.height,
+      4, 0, 2 * Math.PI
+    );
+    canvasCtx.fill();
+  }
+  canvasCtx.restore();
+
+  // Now turn the 21 landmarks into the same 63-number feature vector
+  // your model was trained on, and predict.
+  const features = landmarksToFeatures(landmarks);
+  predict(features);
+}
+
+
+// ================================================================
+// STEP 6: THE CRITICAL PART.
+//
+// This reproduces your normalize_landmarks.py exactly:
+//   1. Subtract the wrist (landmark 0) from every point's x/y/z,
+//      so the wrist becomes (0, 0, 0). Makes features independent
+//      of WHERE the hand is in the camera frame.
+//   2. Find the scale = the LARGEST x/y distance from the wrist to
+//      any of the 21 (wrist-relative) points. Note: only x and y
+//      are used for this distance, z is ignored here - that's what
+//      your Python script does (points[:, :2]).
+//   3. Divide every x, y, AND z value by that scale. Makes features
+//      independent of hand SIZE / distance from the camera.
+// ================================================================
+
+function landmarksToFeatures(landmarks) {
+
+  const wrist = landmarks[0];
+
+  // Step 1: wrist-relative points, kept in landmark order.
+  const relative = landmarks.map((point) => ({
+    x: point.x - wrist.x,
+    y: point.y - wrist.y,
+    z: point.z - wrist.z
+  }));
+
+  // Step 2: scale = largest 2D (x, y only) distance from the wrist,
+  // checked across all 21 points (matches np.max on axis=1 distances).
+  let scale = 0;
+  for (const point of relative) {
+    const distance2D = Math.sqrt(point.x ** 2 + point.y ** 2);
+    if (distance2D > scale) {
+      scale = distance2D;
+    }
+  }
+
+  // Avoid division by zero, same as the Python version.
+  if (scale < 1e-6) {
+    scale = 1.0;
+  }
+
+  // Step 3: divide x, y, and z by scale, flatten in x,y,z order per
+  // landmark - this matches feature_cols order (x0,y0,z0,x1,y1,z1,...).
+  const features = [];
+
+  for (const point of relative) {
+    features.push(point.x / scale);
+    features.push(point.y / scale);
+    features.push(point.z / scale);
+  }
+
+  // features.length should be 63 (21 landmarks x 3 coordinates).
+  return features;
+}
+
+
+// ================================================================
+// STEP 7: Run the model and show the result.
+//
+// Note: we do NOT need to redo the z-score normalization (mean 0,
+// std 1) here - that's the tf.keras.layers.Normalization layer,
+// which was saved as part of the model itself, so tfjs applies it
+// automatically inside model.predict().
+// ================================================================
+
+async function predict(features) {
+
+  // tf.tensor2d expects a shape [batch_size, num_features].
+  // We have 1 sample of 63 features, so shape is [1, 63].
+  const inputTensor = tf.tensor2d([features], [1, 63]);
+
+  const outputTensor = model.predict(inputTensor);
+
+  // .data() pulls the numbers out of the tensor into a normal
+  // JS array we can actually read.
+  const probabilities = await outputTensor.data();
+
+  // Find which class had the highest probability.
+  let bestIndex = 0;
+  for (let i = 1; i < probabilities.length; i++) {
+    if (probabilities[i] > probabilities[bestIndex]) {
+      bestIndex = i;
+    }
+  }
+
+  const predictedClass = classNames[bestIndex];
+  const confidencePercent = (probabilities[bestIndex] * 100).toFixed(1);
+
+  predictionDiv.textContent = predictedClass;
+  confidenceDiv.textContent = `${confidencePercent}% confidence`;
+
+  // Always clean up tensors you're done with, or memory keeps growing.
+  inputTensor.dispose();
+  outputTensor.dispose();
+}
+
+
+// ================================================================
+// STEP 8: Kick everything off once the page has loaded.
+// ================================================================
+
+loadEverything();
+
+</script>
+</body>
+</html>
