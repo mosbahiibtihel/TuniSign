@@ -12,7 +12,7 @@ import mediapipe as mp
 DATASET_DIR = Path("data/raw/Dataset/Data")
 OUTPUT_DIR = Path("data/processed")
 
-OUTPUT_FILE = OUTPUT_DIR / "landmarks.csv"
+OUTPUT_FILE = OUTPUT_DIR / "landmarks_2hands.csv"
 
 
 # -----------------------------
@@ -40,7 +40,7 @@ options = HandLandmarkerOptions(
         model_asset_path="models/hand_landmarker.task"
     ),
     running_mode=VisionRunningMode.IMAGE,
-    num_hands=1,
+    num_hands=2,
     min_hand_detection_confidence=0.3,
     min_hand_presence_confidence=0.3,
 )
@@ -60,7 +60,7 @@ def main():
     detected_images = 0
     failed_images = 0
 
-    print("Starting landmark extraction...")
+    print("Starting TWO-HAND landmark extraction...")
     print()
 
     with HandLandmarker.create_from_options(options) as landmarker:
@@ -113,32 +113,84 @@ def main():
                         data=image_rgb
                     )
 
-                    # Detect hand
+                    # Detect up to 2 hands
                     result = landmarker.detect(mp_image)
 
                     if not result.hand_landmarks:
                         failed_images += 1
                         continue
 
-                    # Get first hand
-                    hand = result.hand_landmarks[0]
-
+                    # ---------------------------------
                     # Create row
+                    # ---------------------------------
+
                     row = {
                         "category": category_folder.name,
                         "class": class_name,
                         "image_path": str(image_path)
                     }
 
-                    # Add 21 landmarks
-                    for i, landmark in enumerate(hand):
+                    # ---------------------------------
+                    # Save LEFT and RIGHT hand
+                    # ---------------------------------
 
-                        row[f"x{i}"] = landmark.x
-                        row[f"y{i}"] = landmark.y
-                        row[f"z{i}"] = landmark.z
+                    left_hand = None
+                    right_hand = None
+
+                    for hand_landmarks, handedness in zip(
+                        result.hand_landmarks,
+                        result.handedness
+                    ):
+
+                        label = handedness[0].category_name
+
+                        if label == "Left":
+                            left_hand = hand_landmarks
+
+                        elif label == "Right":
+                            right_hand = hand_landmarks
+
+                    # ---------------------------------
+                    # LEFT HAND
+                    # ---------------------------------
+
+                    for i in range(21):
+
+                        if left_hand is not None:
+
+                            landmark = left_hand[i]
+
+                            row[f"left_x{i}"] = landmark.x
+                            row[f"left_y{i}"] = landmark.y
+                            row[f"left_z{i}"] = landmark.z
+
+                        else:
+
+                            row[f"left_x{i}"] = 0.0
+                            row[f"left_y{i}"] = 0.0
+                            row[f"left_z{i}"] = 0.0
+
+                    # ---------------------------------
+                    # RIGHT HAND
+                    # ---------------------------------
+
+                    for i in range(21):
+
+                        if right_hand is not None:
+
+                            landmark = right_hand[i]
+
+                            row[f"right_x{i}"] = landmark.x
+                            row[f"right_y{i}"] = landmark.y
+                            row[f"right_z{i}"] = landmark.z
+
+                        else:
+
+                            row[f"right_x{i}"] = 0.0
+                            row[f"right_y{i}"] = 0.0
+                            row[f"right_z{i}"] = 0.0
 
                     rows.append(row)
-
                     detected_images += 1
 
     # -----------------------------
@@ -158,22 +210,23 @@ def main():
 
     print()
     print("=" * 50)
-    print("LANDMARK EXTRACTION COMPLETE")
+    print("TWO-HAND LANDMARK EXTRACTION COMPLETE")
     print("=" * 50)
 
     print("Images processed:", total_images)
-    print("Hands detected:", detected_images)
+    print("Images with at least one hand:", detected_images)
     print("Detection failures:", failed_images)
 
-    print(
-        "Detection rate:",
-        round(detected_images / total_images * 100, 2),
-        "%"
-    )
+    if total_images > 0:
+        print(
+            "Detection rate:",
+            round(detected_images / total_images * 100, 2),
+            "%"
+        )
 
     print("Classes:", df["class"].nunique())
 
-    print("Landmark features: 63")
+    print("Landmark features: 126")
 
     print()
     print("Saved to:")

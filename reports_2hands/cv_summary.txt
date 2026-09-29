@@ -1,0 +1,5 @@
+5-fold stratified cross-validation (two-hand model)
+Samples: 4006
+Classes: 56
+Features: 132
+Overall accuracy: 0.8882

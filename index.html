@@ -15,8 +15,8 @@
   ================================================================
 -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js"></script>
 
 <style>
   body { font-family: sans-serif; text-align: center; background: #111; color: #eee; }
@@ -106,14 +106,16 @@ async function loadEverything() {
 function startCamera() {
 
   const hands = new Hands({
-    // Must match the exact version pinned in the <script> tag above -
-    // mismatched versions between hands.js and its WASM files is what
-    // caused the "native code called abort()" crash.
-    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+    // Switched from jsdelivr to unpkg: jsdelivr has a known issue
+    // serving MediaPipe's internal model files (like hand_landmark_full.tflite)
+    // correctly, which caused the "Failed to read file ... .tflite" crash.
+    // Must still match the version pinned in the <script> tag above.
+    locateFile: (file) => `https://unpkg.com/@mediapipe/hands@0.4.1675469240/${file}`
   });
 
   hands.setOptions({
     maxNumHands: 1,              // we only care about one hand at a time
+    modelComplexity: 1,           // explicit, matches the default full model
     minDetectionConfidence: 0.3,  // matches the value you found worked
                                    // best during your dataset extraction
     minTrackingConfidence: 0.5

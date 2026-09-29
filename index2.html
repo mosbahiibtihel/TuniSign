@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>TuniSign - Live Demo (2 hands)</title>
+
+<!-- Same libraries as before, same pinned versions. -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+
+<style>
+  body { font-family: sans-serif; text-align: center; background: #111; color: #eee; }
+  #container { position: relative; width: 640px; margin: 20px auto; }
+  video, canvas { position: absolute; top: 0; left: 0; width: 640px; height: 480px; }
+  #prediction { font-size: 32px; margin-top: 500px; padding: 10px; }
+  #confidence { font-size: 16px; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>TuniSign Live Demo (2 hands)</h1>
+
+<div id="container">
+  <video id="webcam" autoplay playsinline></video>
+  <canvas id="overlay" width="640" height="480"></canvas>
+</div>
+
+<div id="prediction">Loading model...</div>
+<div id="confidence"></div>
+
+<script>
+
+// ================================================================
+// SETTINGS - the only two lines you may ever need to change.
+// ================================================================
+
+// Folder with the NEW model (model.json + .bin + class_names.json).
+const MODEL_DIR = "model_2hands";
+
+// If the model seems to confuse LEFT and RIGHT (for example, it works
+// when you sign with the "wrong" side of the screen), set this to true.
+// It mirrors the picture left-right before predicting - useful when the
+// training photos were taken like a selfie mirror and the webcam is not,
+// or the other way round.
+const MIRROR_X = false;
+
+
+// ================================================================
+// Global variables
+// ================================================================
+
+let model = null;
+let classNames = [];
+
+const videoElement = document.getElementById("webcam");
+const canvasElement = document.getElementById("overlay");
+const canvasCtx = canvasElement.getContext("2d");
+const predictionDiv = document.getElementById("prediction");
+const confidenceDiv = document.getElementById("confidence");
+
+
+// ================================================================
+// STEP 1: Load the model and the class names.
+// ================================================================
+
+async function loadEverything() {
+
+  predictionDiv.textContent = "Loading model...";
+
+  model = await tf.loadGraphModel(`${MODEL_DIR}/model.json`);
+
+  const response = await fetch(`${MODEL_DIR}/class_names.json`);
+  classNames = await response.json();
+
+  predictionDiv.textContent = "Model loaded. Starting camera...";
+
+  startCamera();
+}
+
+
+// ================================================================
+// STEP 2: Camera + hand tracking. Only change vs. the one-hand
+// version: maxNumHands is now 2.
+// ================================================================
+
+function startCamera() {
+
+  const hands = new Hands({
+    locateFile: (file) => `https://unpkg.com/@mediapipe/hands@0.4.1675469240/${file}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 2,               // <-- was 1
+    modelComplexity: 1,
+    minDetectionConfidence: 0.3,
+    minTrackingConfidence: 0.5
+  });
+
+  hands.onResults(onHandResults);
+
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await hands.send({ image: videoElement });
+    },
+    width: 640,
+    height: 480
+  });
+
+  camera.start();
+
+  predictionDiv.textContent = "Show a sign...";
+}
+
+
+// ================================================================
+// STEP 3: Runs every video frame.
+// ================================================================
+
+function onHandResults(results) {
+
+  canvasCtx.save();
+  canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+  const allHands = results.multiHandLandmarks;
+
+  if (!allHands || allHands.length === 0) {
+    predictionDiv.textContent = "No hand detected";
+    confidenceDiv.textContent = "";
+    canvasCtx.restore();
+    return;
+  }
+
+  // Draw green dots on every detected hand (1 or 2).
+  canvasCtx.fillStyle = "#00FF00";
+  for (const landmarks of allHands) {
+    for (const point of landmarks) {
+      canvasCtx.beginPath();
+      canvasCtx.arc(
+        point.x * canvasElement.width,
+        point.y * canvasElement.height,
+        4, 0, 2 * Math.PI
+      );
+      canvasCtx.fill();
+    }
+  }
+  canvasCtx.restore();
+
+  const features = handsToFeatures(allHands);
+  predict(features);
+}
+
+
+// ================================================================
+// STEP 4: THE CRITICAL PART - must match normalize_landmarks_2hands.py
+// exactly. Any difference = silently wrong predictions.
+// ================================================================
+
+// Part A: normalize ONE hand (same recipe as training).
+function normalizeOneHand(landmarks) {
+
+  // Optional left-right mirror (see MIRROR_X at the top).
+  const points = landmarks.map((p) => ({
+    x: MIRROR_X ? 1 - p.x : p.x,
+    y: p.y,
+    z: p.z
+  }));
+
+  const wrist = points[0];
+
+  // 1. wrist becomes (0, 0, 0)
+  const relative = points.map((p) => ({
+    x: p.x - wrist.x,
+    y: p.y - wrist.y,
+    z: p.z - wrist.z
+  }));
+
+  // 2. scale = biggest x/y distance from the wrist (z is ignored here)
+  let scale = 0;
+  for (const p of relative) {
+    const distance2D = Math.sqrt(p.x ** 2 + p.y ** 2);
+    if (distance2D > scale) {
+      scale = distance2D;
+    }
+  }
+  if (scale < 1e-6) {
+    scale = 1.0;
+  }
+
+  // 3. divide x, y AND z by the scale, in x,y,z order per landmark
+  const flat = [];
+  for (const p of relative) {
+    flat.push(p.x / scale);
+    flat.push(p.y / scale);
+    flat.push(p.z / scale);
+  }
+
+  // Also keep the wrist's ORIGINAL position in the image.
+  return { flat: flat, wristX: wrist.x, wristY: wrist.y };
+}
+
+
+// Part B: build the 132-number vector for the model.
+// Layout = [hand slot 1: 63 numbers + wrist_x + wrist_y + present]
+//          [hand slot 2: 63 numbers + wrist_x + wrist_y + present]
+function handsToFeatures(allHands) {
+
+  const hands = allHands.map(normalizeOneHand);
+
+  // Fixed order: hand with the smaller wrist x (leftmost in the image)
+  // goes first. Training used the same rule.
+  hands.sort((a, b) => a.wristX - b.wristX);
+
+  const features = [];
+
+  for (let slot = 0; slot < 2; slot++) {
+    if (slot < hands.length) {
+      features.push(...hands[slot].flat);
+      features.push(hands[slot].wristX, hands[slot].wristY, 1.0);  // present
+    } else {
+      for (let i = 0; i < 66; i++) {
+        features.push(0.0);                                        // empty slot
+      }
+    }
+  }
+
+  return features;   // length must be 132
+}
+
+
+// ================================================================
+// STEP 5: Predict and show the 3 most likely signs.
+// ================================================================
+
+async function predict(features) {
+
+  const inputTensor = tf.tensor2d([features], [1, 132]);
+
+  const outputTensor = model.predict(inputTensor);
+  const probabilities = await outputTensor.data();
+
+  // Sort all classes from most to least likely, keep the best 3.
+  const ranked = Array.from(probabilities)
+    .map((p, index) => ({ p: p, index: index }))
+    .sort((a, b) => b.p - a.p)
+    .slice(0, 3);
+
+  predictionDiv.textContent = classNames[ranked[0].index];
+
+  confidenceDiv.textContent = ranked
+    .map((r) => `${classNames[r.index]} ${(r.p * 100).toFixed(0)}%`)
+    .join("   |   ");
+
+  inputTensor.dispose();
+  outputTensor.dispose();
+}
+
+
+loadEverything();
+
+</script>
+</body>
+</html>
